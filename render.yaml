@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: vtx-earn-bot
+    runtime: docker
+    plan: standard
+    envVars:
+      - key: APP_NAME
+        value: VTX Earn Arena
+      - key: ENVIRONMENT
+        value: production
+      - key: WEBHOOK_PATH
+        value: /telegram/webhook
+      - key: WHITELIST_ONLY
+        value: true
