@@ -1,7 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -21,21 +25,21 @@ class User(Base):
     total_tokens: Mapped[float] = mapped_column(Float, default=0)
     profit_per_hour: Mapped[float] = mapped_column(Float, default=0)
     stamina: Mapped[int] = mapped_column(Integer, default=0)
-    last_stamina_sync_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    last_tap_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_stamina_sync_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_tap_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tap_combo_counter: Mapped[int] = mapped_column(Integer, default=0)
     suspicious_score: Mapped[int] = mapped_column(Integer, default=0)
     lifetime_taps: Mapped[int] = mapped_column(Integer, default=0)
     daily_taps: Mapped[int] = mapped_column(Integer, default=0)
-    last_daily_reset_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_daily_reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     level: Mapped[int] = mapped_column(Integer, default=1)
-    last_reward_claim_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    withdrawal_locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    vip_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_reward_claim_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    withdrawal_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    vip_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     wallet_address: Mapped[str | None] = mapped_column(String(256), nullable=True)
     locale: Mapped[str | None] = mapped_column(String(12), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     invited_by = relationship("User", remote_side=[id], uselist=False)
 
@@ -47,7 +51,7 @@ class TapEvent(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     tap_amount: Mapped[int] = mapped_column(Integer)
     gain_tokens: Mapped[float] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Referral(Base):
@@ -58,7 +62,7 @@ class Referral(Base):
     inviter_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     invitee_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     reward_paid: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class MarketOrder(Base):
@@ -72,7 +76,7 @@ class MarketOrder(Base):
     fee_amount: Mapped[float] = mapped_column(Float)
     exchange_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="created")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Quest(Base):
@@ -86,9 +90,9 @@ class Quest(Base):
     reward_tokens: Mapped[float] = mapped_column(Float)
     reward_pph: Mapped[float] = mapped_column(Float, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class UserQuestProgress(Base):
@@ -100,8 +104,8 @@ class UserQuestProgress(Base):
     quest_id: Mapped[int] = mapped_column(ForeignKey("quests.id"), index=True)
     current_value: Mapped[int] = mapped_column(Integer, default=0)
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False)
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class DeviceFingerprint(Base):
@@ -111,8 +115,8 @@ class DeviceFingerprint(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     fingerprint_hash: Mapped[str] = mapped_column(String(128), index=True)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     risk_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -122,11 +126,11 @@ class AirdropEpoch(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     month_key: Mapped[str] = mapped_column(String(16), index=True)
-    starts_at: Mapped[datetime] = mapped_column(DateTime)
-    ends_at: Mapped[datetime] = mapped_column(DateTime)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     total_pool_tokens: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(24), default="planned")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AirdropSnapshot(Base):
@@ -139,7 +143,7 @@ class AirdropSnapshot(Base):
     weighted_score: Mapped[float] = mapped_column(Float, default=0)
     airdrop_amount: Mapped[float] = mapped_column(Float, default=0)
     is_eligible: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class WithdrawalRequest(Base):
@@ -153,7 +157,7 @@ class WithdrawalRequest(Base):
     token_amount: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(24), default="pending")
     reviewer_note: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AuditLog(Base):
@@ -163,7 +167,7 @@ class AuditLog(Base):
     actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     action_code: Mapped[str] = mapped_column(String(64), index=True)
     details_json: Mapped[str] = mapped_column(String(2048))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CardDefinition(Base):
@@ -180,7 +184,7 @@ class CardDefinition(Base):
     stage_profit_max: Mapped[float] = mapped_column(Float)
     max_stage: Mapped[int] = mapped_column(Integer, default=15)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class UserCard(Base):
@@ -192,8 +196,8 @@ class UserCard(Base):
     card_id: Mapped[int] = mapped_column(ForeignKey("card_definitions.id"), index=True)
     stage: Mapped[int] = mapped_column(Integer, default=0)
     total_spent: Mapped[float] = mapped_column(Float, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class BroadcastLog(Base):
@@ -203,7 +207,7 @@ class BroadcastLog(Base):
     message_key: Mapped[str] = mapped_column(String(64), index=True)
     sent_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class UserWallet(Base):
@@ -215,7 +219,7 @@ class UserWallet(Base):
     wallet_network: Mapped[str] = mapped_column(String(32))
     wallet_address: Mapped[str] = mapped_column(String(256))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class WorkerJob(Base):
@@ -227,8 +231,8 @@ class WorkerJob(Base):
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class PayoutTx(Base):
@@ -239,4 +243,4 @@ class PayoutTx(Base):
     network: Mapped[str] = mapped_column(String(32))
     tx_hash: Mapped[str] = mapped_column(String(256), index=True)
     status: Mapped[str] = mapped_column(String(24), default="broadcasted")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
