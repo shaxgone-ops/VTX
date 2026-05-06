@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.models import Base
@@ -46,10 +47,19 @@ async_session_factory = async_sessionmaker(
 # ---------------------------------------------------------------------------
 
 async def create_tables() -> None:
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, and apply auto-migrations."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables ensured")
+        
+        # Auto-migrate: Add newly added columns if they don't exist
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS language_code VARCHAR(12)"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS locale VARCHAR(12)"))
+            await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_earnings_sync_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"))
+        except Exception as e:
+            logger.warning(f"Failed to auto-migrate 'users' table columns: {e}")
+
+    logger.info("Database tables and missing columns ensured")
 
 
 # ---------------------------------------------------------------------------
