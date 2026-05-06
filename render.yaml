@@ -1,14 +1,39 @@
 services:
+  # ── Backend Web Service (Bot + API) ─────────────────────────────────
   - type: web
     name: vtx-earn-bot
     runtime: docker
-    plan: standard
+    plan: free
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: APP_NAME
-        value: VTX Earn Arena
-      - key: ENVIRONMENT
-        value: production
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_BASE_URL
+        sync: false
       - key: WEBHOOK_PATH
         value: /telegram/webhook
-      - key: WHITELIST_ONLY
-        value: true
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: POSTGRES_DSN
+        sync: false
+      - key: FRONTEND_PUBLIC_URL
+        sync: false
+      - key: BACKEND_PUBLIC_URL
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: VIP_IDS
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+
+  # ── Frontend Static Site ────────────────────────────────────────────
+  - type: web
+    name: vtx-earn-frontend
+    runtime: static
+    plan: free
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false

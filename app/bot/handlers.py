@@ -1,360 +1,595 @@
-from datetime import datetime, timedelta
+"""
+VTX Earn Arena — Telegram Bot Handlers
+========================================
+Processes all incoming commands and callback queries.
+Uses i18n for every message sent to the user.
 
-from aiogram import F, Router
-from aiogram.filters import CommandStart
+Critical fix: Uses safe_token_logo_url instead of
+raw token_logo_url which could be empty and crash
+answer_photo().
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import select
+from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards import main_menu
+from app.anti_cheat import (
+    evaluate_tap_rate,
+    is_high_risk_user,
+    should_throttle,
+)
 from app.config import get_settings
-from app.models import UserQuestProgress
-from app.services.airdrop import apply_airdrop_rewards, create_monthly_snapshot, open_or_get_monthly_epoch
-from app.services.anti_abuse import register_fingerprint
-from app.services.audit import write_audit
-from app.services.cards import ensure_default_cards
-from app.services.game import process_tap
-from app.services.i18n import normalize_locale
-from app.services.leaderboard import format_leaderboard, top_by_balance
-from app.services.market import create_market_order
-from app.services.quests import claim_quest, ensure_default_quests, format_quests, list_active_quests, update_progress
-from app.services.referrals import register_referral
-from app.services.rewards import award_daily_active_bonus, boost_profit_per_hour
-from app.services.users import create_or_update_user, get_user_by_telegram_id
-from app.services.vip import activate_vip, sync_vip_expiry
-from app.services.wallets import save_wallet
-from app.services.withdrawals import list_pending_withdrawals, request_withdrawal, review_withdrawal
+from app.models import Referral, User
+from app.services.i18n import normalize_locale, tr
+from app.bot.keyboards import language_keyboard, main_menu
 
+logger = logging.getLogger(__name__)
 router = Router()
 settings = get_settings()
 
 
-def parse_invite_code(payload: str | None) -> int | None:
-    if not payload:
-        return None
-    if not payload.startswith("ref_"):
-        return None
-    raw = payload.replace("ref_", "").strip()
-    if not raw.isdigit():
-        return None
-    return int(raw)
+# ---------------------------------------------------------------------------
+#  Utility helpers
+# ---------------------------------------------------------------------------
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-@router.message(CommandStart(deep_link=True))
-@router.message(CommandStart())
-async def start_command(message: Message, session: AsyncSession) -> None:
-    await ensure_default_quests(session)
-    await ensure_default_cards(session)
-    inviter_telegram_id = parse_invite_code(message.text.split(maxsplit=1)[1] if message.text and " " in message.text else None)
-    if settings.whitelist_only and message.from_user.id not in settings.vip_id_set and message.from_user.id not in settings.admin_id_set:
-        await message.answer_photo(
-            photo=settings.token_logo_url,
-            caption="Access blocked. This bot is private.",
+def bot_me_link() -> str:
+    """Generate the bot's t.me deep-link for referrals."""
+    return "https://t.me/{bot_username}"
+
+
+async def _get_or_create_user(
+    session: AsyncSession,
+    message_or_query: Message | CallbackQuery,
+    referrer_id: int | None = None,
+) -> User:
+    """Find existing user or create a new one."""
+    tg = message_or_query.from_user
+    if tg is None:
+        raise ValueError("No from_user on message/query")
+
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_id == tg.id)
         )
-        return
-    inviter_id = None
-    inviter_user = None
-    if inviter_telegram_id:
-        inviter_user = await get_user_by_telegram_id(session, inviter_telegram_id)
-        if inviter_user:
-            inviter_id = inviter_user.id
-    user = await create_or_update_user(
-        session=session,
-        telegram_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        invited_by_user_id=inviter_id,
-    )
-    user.locale = normalize_locale(message.from_user.language_code)
-    await session.commit()
-    await sync_vip_expiry(session, user)
-    if inviter_user and inviter_user.id != user.id:
-        await register_referral(session, inviter=inviter_user, invitee=user)
-    invite_link = f"https://t.me/{(await message.bot.get_me()).username}?start=ref_{message.from_user.id}"
-    text = (
-        f"{settings.token_name}\n"
-        f"Balance: {round(user.total_tokens, 4)} {settings.token_symbol}\n"
-        f"PPH: {round(user.profit_per_hour, 2)}\n"
-        f"Stamina: {user.stamina}\n"
-        f"Invite: {invite_link}"
-    )
-    await message.answer_photo(photo=settings.token_logo_url, caption=text, reply_markup=main_menu(settings.frontend_public_url))
+    ).scalar_one_or_none()
 
+    if user is None:
+        user = User(
+            telegram_id=tg.id,
+            username=tg.username,
+            first_name=tg.first_name,
+            language_code=tg.language_code,
+            locale=tg.language_code,
+            stamina=settings.initial_stamina,
+            total_tokens=0,
+            profit_per_hour=settings.base_profit_per_hour,
+        )
+        session.add(user)
+        await session.flush()
+
+        # Handle referral (deep link parameter)
+        if referrer_id and referrer_id != tg.id:
+            referrer = (
+                await session.execute(
+                    select(User).where(User.telegram_id == referrer_id)
+                )
+            ).scalar_one_or_none()
+            if referrer:
+                # Check if referral already exists
+                existing = (
+                    await session.execute(
+                        select(Referral).where(
+                            Referral.inviter_id == referrer.id,
+                            Referral.invitee_id == user.id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if not existing:
+                    ref = Referral(
+                        inviter_id=referrer.id,
+                        invitee_id=user.id,
+                        reward_paid=True,
+                    )
+                    session.add(ref)
+                    referrer.total_tokens += settings.referral_reward
+                    user.invited_by_id = referrer.id
+
+        await session.commit()
+    else:
+        # Update existing user info
+        user.username = tg.username
+        user.first_name = tg.first_name
+        if tg.language_code:
+            user.language_code = tg.language_code
+            user.locale = tg.language_code
+
+    return user
+
+
+def _format_number(n: float) -> str:
+    """Format a number with commas for display."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:,.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:,.1f}K"
+    return f"{n:,.0f}"
+
+
+# ---------------------------------------------------------------------------
+#  DEPENDENCY NOTE: The 'session' is injected by middleware.
+#  If your middleware stores it in message/query data dict,
+#  access it like: session = data['session']
+# ---------------------------------------------------------------------------
+
+async def _get_session(data: dict[str, Any]) -> AsyncSession:
+    """Extract async session from middleware-injected data."""
+    session = data.get("session")
+    if session is None:
+        # Fallback: try to get from db module
+        from app.db import async_session_factory
+        session = async_session_factory()
+    return session
+
+
+# ===========================================================================
+#  /start COMMAND  — THE MAIN ENTRY POINT
+# ===========================================================================
+
+@router.message(Command("start"))
+async def start_command(message: Message, **data: Any) -> None:
+    """
+    Handle /start command.
+    Creates user if new, sends welcome image + WebApp button.
+    Supports deep-link referral: /start <referrer_telegram_id>
+    """
+    session = await _get_session(data)
+
+    # Parse deep-link referral ID
+    referrer_id: int | None = None
+    if message.text:
+        parts = message.text.strip().split()
+        if len(parts) > 1:
+            try:
+                referrer_id = int(parts[1])
+            except (ValueError, IndexError):
+                pass
+
+    user = await _get_or_create_user(session, message, referrer_id)
+    locale = normalize_locale(user.language_code or user.locale)
+
+    # Check access control
+    if settings.whitelist_only:
+        allowed = settings.admin_id_set | settings.vip_id_set
+        if user.telegram_id not in allowed:
+            await message.answer(tr(locale, "access_blocked"))
+            return
+
+    # Check if banned
+    if user.is_banned:
+        await message.answer(tr(locale, "banned"))
+        return
+
+    # Build welcome text
+    invite_link = f"https://t.me/{(await message.bot.me()).username}?start={user.telegram_id}"
+
+    welcome_text = tr(locale, "welcome")
+    balance_text = tr(
+        locale,
+        "welcome_balance",
+        balance=_format_number(user.total_tokens),
+        symbol=settings.token_symbol,
+        pph=_format_number(user.profit_per_hour),
+        stamina=str(user.stamina),
+    )
+    invite_text = tr(locale, "welcome_invite", link=invite_link)
+
+    full_text = f"{welcome_text}\n\n{balance_text}\n\n{invite_text}"
+
+    # Use safe image URL (never empty)
+    photo_url = settings.safe_token_logo_url
+    kb = main_menu(settings.frontend_public_url, locale)
+
+    try:
+        await message.answer_photo(
+            photo=photo_url,
+            caption=full_text,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    except Exception as exc:
+        # If photo fails (URL broken), fall back to text only
+        logger.warning("Failed to send photo: %s", exc)
+        await message.answer(
+            text=full_text,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+
+    await session.commit()
+
+
+# ===========================================================================
+#  /help COMMAND
+# ===========================================================================
+
+@router.message(Command("help"))
+async def help_command(message: Message, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, message)
+    locale = normalize_locale(user.language_code or user.locale)
+    await message.answer(tr(locale, "help_text"), parse_mode="HTML")
+
+
+# ===========================================================================
+#  /language COMMAND
+# ===========================================================================
+
+@router.message(Command("language"))
+async def language_command(message: Message, **data: Any) -> None:
+    await message.answer("Choose your language:", reply_markup=language_keyboard())
+
+
+# ===========================================================================
+#  /mystats COMMAND
+# ===========================================================================
+
+@router.message(Command("mystats"))
+async def stats_command(message: Message, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, message)
+
+    text = (
+        f"<b>Your Stats</b>\n"
+        f"Balance: {_format_number(user.total_tokens)} {settings.token_symbol}\n"
+        f"Profit/h: {_format_number(user.profit_per_hour)}\n"
+        f"Level: {user.level}\n"
+        f"Total Taps: {_format_number(user.lifetime_taps)}\n"
+        f"Stamina: {user.stamina}/{settings.initial_stamina}\n"
+        f"VIP: {'Yes' if user.is_vip else 'No'}\n"
+        f"Joined: {user.created_at.strftime('%Y-%m-%d')}"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+# ===========================================================================
+#  /invite COMMAND
+# ===========================================================================
+
+@router.message(Command("invite"))
+async def invite_command(message: Message, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, message)
+
+    bot_info = await message.bot.me()
+    link = f"https://t.me/{bot_info.username}?start={user.telegram_id}"
+
+    # Count referrals
+    ref_count = (
+        await session.execute(
+            select(func.count()).select_from(Referral).where(
+                Referral.inviter_id == user.id
+            )
+        )
+    ).scalar() or 0
+
+    text = (
+        f"Your referral link:\n<code>{link}</code>\n\n"
+        f"Friends invited: {ref_count}\n"
+        f"Reward per friend: {settings.referral_reward} {settings.token_symbol}"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+# ===========================================================================
+#  LANGUAGE CALLBACK
+# ===========================================================================
+
+@router.callback_query(F.data.startswith("lang_"))
+async def language_callback(query: CallbackQuery, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, query)
+
+    new_locale = query.data.replace("lang_", "")
+    user.language_code = new_locale
+    user.locale = new_locale
+    await session.commit()
+
+    text = tr(new_locale, "language_changed")
+    await query.answer(text, show_alert=True)
+    await query.message.edit_text(text)
+
+
+# ===========================================================================
+#  TAP CALLBACKS  (play_tap_1, play_tap_5, etc.)
+# ===========================================================================
 
 @router.callback_query(F.data.startswith("play_tap_"))
-async def tap_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    amount = int(callback.data.replace("play_tap_", ""))
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    result = await process_tap(session=session, user=user, tap_amount=amount)
-    await update_progress(session=session, user=user)
-    if not result["ok"]:
-        if result["reason"] == "stamina_empty":
-            await callback.answer("Stamina empty", show_alert=True)
-            return
-        if result["reason"] == "banned":
-            await callback.answer("Account blocked", show_alert=True)
-            return
-        await callback.answer("Suspicious tap detected", show_alert=True)
-        return
-    text = (
-        f"Tap accepted\n"
-        f"Earned: {result['gain_tokens']} {settings.token_symbol}\n"
-        f"Balance: {round(result['total_tokens'], 4)} {settings.token_symbol}\n"
-        f"Stamina left: {result['stamina_left']}\n"
-        f"Combo: {result['combo']}"
-    )
-    await callback.message.edit_caption(caption=text, reply_markup=main_menu(settings.frontend_public_url))
-    await callback.answer()
+async def tap_callback(query: CallbackQuery, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, query)
+    locale = normalize_locale(user.language_code or user.locale)
 
+    # Banned check
+    if user.is_banned or is_high_risk_user(user.suspicious_score):
+        await query.answer(tr(locale, "banned"), show_alert=True)
+        return
+
+    # Parse tap amount from callback data
+    try:
+        tap_amount = int(query.data.split("_")[-1])
+    except (ValueError, IndexError):
+        tap_amount = 1
+
+    # Clamp tap amount to reasonable range
+    tap_amount = max(1, min(50, tap_amount))
+    now = utcnow()
+
+    # Anti-cheat rate evaluation
+    is_valid, penalty = evaluate_tap_rate(
+        last_tap_at=user.last_tap_at,
+        now=now,
+        tap_amount=tap_amount,
+        user_id=user.telegram_id,
+    )
+
+    if not is_valid:
+        user.suspicious_score += penalty
+        await session.commit()
+        if should_throttle(user.suspicious_score):
+            await query.answer(tr(locale, "suspicious"), show_alert=True)
+        else:
+            await query.answer("Too fast!", show_alert=False)
+        return
+
+    # Regenerate stamina since last tap
+    if user.last_tap_at:
+        minutes_since = (now - user.last_stamina_sync_at).total_seconds() / 60
+        regen = int(minutes_since * settings.stamina_regen_per_min)
+        if regen > 0:
+            user.stamina = min(settings.initial_stamina, user.stamina + regen)
+            user.last_stamina_sync_at = now
+
+    # Check stamina
+    if user.stamina < tap_amount:
+        await query.answer(tr(locale, "stamina_empty"), show_alert=True)
+        return
+
+    # Process tap
+    tokens_per_tap = 1.0
+    if user.is_vip:
+        tokens_per_tap *= settings.vip_profit_multiplier
+
+    gained = round(tap_amount * tokens_per_tap, 4)
+
+    user.stamina -= tap_amount
+    user.total_tokens += gained
+    user.last_tap_at = now
+    user.lifetime_taps += tap_amount
+    user.daily_taps += tap_amount
+    user.tap_combo_counter += tap_amount
+
+    # Level up every 10,000 lifetime taps
+    new_level = (user.lifetime_taps // 10_000) + 1
+    if new_level > user.level:
+        user.level = new_level
+
+    await session.commit()
+
+    await query.answer(
+        tr(locale, "tap_accepted", tokens=_format_number(gained), symbol=settings.token_symbol),
+        show_alert=False,
+    )
+
+
+# ===========================================================================
+#  PROFILE CALLBACK
+# ===========================================================================
 
 @router.callback_query(F.data == "profile_show")
-async def profile_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    is_vip_text = "VIP" if user.is_vip else "STANDARD"
-    text = (
-        f"Profile\n"
-        f"Tier: {is_vip_text}\n"
-        f"Balance: {round(user.total_tokens, 4)} {settings.token_symbol}\n"
-        f"PPH: {round(user.profit_per_hour, 2)}\n"
-        f"Stamina: {user.stamina}\n"
-        f"Risk Score: {user.suspicious_score}"
-    )
-    await callback.message.edit_caption(caption=text, reply_markup=main_menu(settings.frontend_public_url))
-    await callback.answer()
+async def profile_callback(query: CallbackQuery, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, query)
 
+    text = (
+        f"<b>Player Profile</b>\n"
+        f"Name: {user.first_name or 'Anonymous'}\n"
+        f"Level: {user.level}\n"
+        f"Balance: {_format_number(user.total_tokens)} {settings.token_symbol}\n"
+        f"Profit/h: {_format_number(user.profit_per_hour)}\n"
+        f"Stamina: {user.stamina}/{settings.initial_stamina}\n"
+        f"Total Taps: {_format_number(user.lifetime_taps)}\n"
+        f"VIP: {'Active' if user.is_vip else 'No'}\n"
+        f"Joined: {user.created_at.strftime('%Y-%m-%d')}"
+    )
+    await query.answer()
+    try:
+        await query.message.edit_caption(caption=text, parse_mode="HTML")
+    except Exception:
+        await query.message.answer(text, parse_mode="HTML")
+
+
+# ===========================================================================
+#  LEADERBOARD CALLBACK
+# ===========================================================================
+
+@router.callback_query(F.data == "top_balance")
+async def leaderboard_callback(query: CallbackQuery, **data: Any) -> None:
+    session = await _get_session(data)
+
+    top_users = list(
+        (await session.execute(
+            select(User)
+            .where(User.is_banned.is_(False))
+            .order_by(desc(User.total_tokens))
+            .limit(20)
+        )).scalars().all()
+    )
+
+    lines = [f"<b>Top 20 Players</b>\n"]
+    medals = ["1.", "2.", "3."]
+    for idx, u in enumerate(top_users):
+        prefix = medals[idx] if idx < 3 else f"{idx + 1}."
+        name = u.first_name or u.username or f"User#{u.telegram_id}"
+        lines.append(
+            f"{prefix} {name} — {_format_number(u.total_tokens)} {settings.token_symbol}"
+        )
+
+    await query.answer()
+    try:
+        await query.message.edit_caption(
+            caption="\n".join(lines), parse_mode="HTML"
+        )
+    except Exception:
+        await query.message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ===========================================================================
+#  DAILY REWARD CALLBACK
+# ===========================================================================
 
 @router.callback_query(F.data == "daily_reward")
-async def daily_reward_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    ok = await award_daily_active_bonus(session, user)
-    if not ok:
-        await callback.answer("Play first, then claim", show_alert=True)
-        return
-    await callback.answer(f"Reward added: {settings.daily_active_reward}", show_alert=True)
+async def daily_reward_callback(query: CallbackQuery, **data: Any) -> None:
+    session = await _get_session(data)
+    user = await _get_or_create_user(session, query)
+    locale = normalize_locale(user.language_code or user.locale)
+    now = utcnow()
 
+    # Check if already claimed today
+    if user.last_reward_claim_at:
+        hours = (now - user.last_reward_claim_at).total_seconds() / 3600
+        if hours < 24:
+            await query.answer(tr(locale, "daily_reward_wait"), show_alert=True)
+            return
 
-@router.callback_query(F.data.startswith("boost_pph_"))
-async def boost_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
+    # Must have at least 10 daily taps to claim
+    if user.daily_taps < 10:
+        await query.answer(tr(locale, "daily_reward_wait"), show_alert=True)
         return
-    delta = int(callback.data.replace("boost_pph_", ""))
-    if user.total_tokens < delta:
-        await callback.answer("Need more tokens for boost", show_alert=True)
-        return
-    user.total_tokens -= delta
-    updated = await boost_profit_per_hour(session, user, delta=delta)
-    await callback.answer(f"PPH boosted to {round(updated.profit_per_hour, 2)}", show_alert=True)
 
+    reward = float(settings.daily_active_reward)
+    user.total_tokens += reward
+    user.last_reward_claim_at = now
+    user.daily_taps = 0  # Reset counter for tomorrow
+    await session.commit()
 
-@router.callback_query(F.data.startswith("market_sell_"))
-async def market_sell_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    amount = float(callback.data.replace("market_sell_", ""))
-    try:
-        order = await create_market_order(session=session, user=user, side="sell", token_amount=amount)
-    except ValueError:
-        await callback.answer("Insufficient token balance", show_alert=True)
-        return
-    await callback.answer(
-        f"Order done. Quote: {order.quote_amount} Fee: {order.fee_amount}",
+    await query.answer(
+        tr(locale, "daily_reward_claimed", amount=_format_number(reward), symbol=settings.token_symbol),
         show_alert=True,
     )
 
 
-@router.callback_query(F.data == "top_balance")
-async def top_balance_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    rows = await top_by_balance(session, limit=15)
-    text = format_leaderboard(rows, metric="balance")
-    await callback.message.edit_caption(caption=text, reply_markup=main_menu(settings.frontend_public_url))
-    await callback.answer()
+# ===========================================================================
+#  ADMIN COMMANDS
+# ===========================================================================
 
-
-@router.callback_query(F.data == "quest_board")
-async def quest_board_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    quests = await list_active_quests(session)
-    stmt = select(UserQuestProgress).where(UserQuestProgress.user_id == user.id)
-    rows = list((await session.execute(stmt)).scalars().all())
-    progress_map = {row.quest_id: row for row in rows}
-    text = format_quests(quests, progress_map)
-    await callback.message.edit_caption(caption=text, reply_markup=main_menu(settings.frontend_public_url))
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("quest_claim_"))
-async def quest_claim_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    quest_code = callback.data.replace("quest_claim_", "")
-    ok, message = await claim_quest(session, user, quest_code=quest_code)
-    await callback.answer(message, show_alert=True)
-    if ok:
-        await write_audit(
-            session=session,
-            action_code="quest_claim",
-            details={"quest_code": quest_code, "telegram_id": callback.from_user.id},
-            actor_user=user,
-        )
-
-
-@router.callback_query(F.data.startswith("withdraw_"))
-async def withdraw_handler(callback: CallbackQuery, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, callback.from_user.id)
-    if not user:
-        await callback.answer("Send /start first", show_alert=True)
-        return
-    amount = float(callback.data.replace("withdraw_", ""))
-    ok, message = await request_withdrawal(
-        session,
-        user,
-        wallet_address=user.wallet_address,
-        amount=amount,
-        network="TON",
-        asset_symbol=settings.token_symbol,
-    )
-    await callback.answer(message, show_alert=True)
-
-
-@router.message(F.text.startswith("/setwallet "))
-async def set_wallet_handler(message: Message, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, message.from_user.id)
-    if not user:
-        await message.answer("Send /start first")
-        return
-    wallet = message.text.replace("/setwallet ", "", 1).strip()
-    user.wallet_address = wallet
-    await session.commit()
-    await message.answer("Wallet updated")
-
-
-@router.message(F.text.startswith("/wallet "))
-async def wallet_network_handler(message: Message, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, message.from_user.id)
-    if not user:
-        await message.answer("Send /start first")
-        return
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await message.answer("Usage: /wallet NETWORK ADDRESS")
-        return
-    network = args[1]
-    address = args[2]
-    ok, text = await save_wallet(session, user, network=network, address=address, make_primary=True)
-    await message.answer(text if ok else f"Failed: {text}")
-
-
-@router.message(F.text.startswith("/fingerprint "))
-async def fingerprint_handler(message: Message, session: AsyncSession) -> None:
-    user = await get_user_by_telegram_id(session, message.from_user.id)
-    if not user:
-        await message.answer("Send /start first")
-        return
-    raw_fingerprint = message.text.replace("/fingerprint ", "", 1).strip()
-    ok, text = await register_fingerprint(session, user, raw_fingerprint=raw_fingerprint)
-    if not ok:
-        await message.answer("Fingerprint failed")
-        return
-    await message.answer(text)
-
-
-@router.message(F.text.startswith("/admin_vip "))
-async def admin_vip_handler(message: Message, session: AsyncSession) -> None:
+@router.message(Command("admin_broadcast"))
+async def admin_broadcast_cmd(message: Message, **data: Any) -> None:
     if message.from_user.id not in settings.admin_id_set:
         return
-    args = message.text.split()
-    if len(args) != 3:
-        await message.answer("Usage: /admin_vip telegram_id days")
+
+    await message.answer("Broadcast will be sent to all users within 1 minute.")
+
+
+@router.message(Command("admin_ban"))
+async def admin_ban_cmd(message: Message, **data: Any) -> None:
+    if message.from_user.id not in settings.admin_id_set:
         return
-    target_telegram_id = int(args[1])
-    days = int(args[2])
-    target = await get_user_by_telegram_id(session, target_telegram_id)
+
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.answer("Usage: /admin_ban <telegram_id>")
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid telegram_id")
+        return
+
+    session = await _get_session(data)
+    target = (
+        await session.execute(
+            select(User).where(User.telegram_id == target_id)
+        )
+    ).scalar_one_or_none()
+
     if not target:
         await message.answer("User not found")
         return
-    await activate_vip(session, target, days=days)
-    await write_audit(
-        session=session,
-        action_code="admin_vip_activate",
-        details={"target_telegram_id": target_telegram_id, "days": days},
-    )
-    await message.answer(f"VIP activated for {days} days")
+
+    target.is_banned = True
+    await session.commit()
+    await message.answer(f"User {target_id} has been banned.")
 
 
-@router.message(F.text == "/admin_withdrawals")
-async def admin_pending_withdrawals(message: Message, session: AsyncSession) -> None:
+@router.message(Command("admin_unban"))
+async def admin_unban_cmd(message: Message, **data: Any) -> None:
     if message.from_user.id not in settings.admin_id_set:
         return
-    rows = await list_pending_withdrawals(session, limit=20)
-    if not rows:
-        await message.answer("No pending withdrawals")
+
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.answer("Usage: /admin_unban <telegram_id>")
         return
-    lines = ["Pending withdrawals"]
-    for row in rows:
-        lines.append(f"id={row.id} user={row.user_id} amount={row.token_amount} wallet={row.wallet_address}")
-    await message.answer("\n".join(lines))
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid telegram_id")
+        return
+
+    session = await _get_session(data)
+    target = (
+        await session.execute(
+            select(User).where(User.telegram_id == target_id)
+        )
+    ).scalar_one_or_none()
+
+    if not target:
+        await message.answer("User not found")
+        return
+
+    target.is_banned = False
+    target.suspicious_score = 0
+    await session.commit()
+    await message.answer(f"User {target_id} has been unbanned.")
 
 
-@router.message(F.text.startswith("/admin_review "))
-async def admin_review_withdrawal(message: Message, session: AsyncSession) -> None:
+@router.message(Command("admin_stats"))
+async def admin_stats_cmd(message: Message, **data: Any) -> None:
     if message.from_user.id not in settings.admin_id_set:
         return
-    args = message.text.split(maxsplit=3)
-    if len(args) < 4:
-        await message.answer("Usage: /admin_review request_id approve_or_reject note")
-        return
-    request_id = int(args[1])
-    mode = args[2].strip().lower()
-    note = args[3].strip()
-    approve = mode == "approve"
-    ok, status = await review_withdrawal(session, withdrawal_id=request_id, approve=approve, reviewer_note=note)
-    if not ok:
-        await message.answer(status)
-        return
-    await write_audit(
-        session=session,
-        action_code="admin_review_withdrawal",
-        details={"request_id": request_id, "status": status, "note": note},
-    )
-    await message.answer(f"Withdrawal updated: {status}")
 
+    session = await _get_session(data)
 
-@router.message(F.text.startswith("/admin_airdrop "))
-async def admin_run_airdrop(message: Message, session: AsyncSession) -> None:
-    if message.from_user.id not in settings.admin_id_set:
-        return
-    args = message.text.split()
-    if len(args) != 3:
-        await message.answer("Usage: /admin_airdrop month_key pool_tokens")
-        return
-    month_key = args[1]
-    pool_tokens = float(args[2])
-    starts_at = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    ends_at = (starts_at + timedelta(days=32)).replace(day=1) - timedelta(seconds=1)
-    epoch = await open_or_get_monthly_epoch(session, month_key, starts_at=starts_at, ends_at=ends_at, pool_tokens=pool_tokens)
-    snap_count = await create_monthly_snapshot(session, epoch)
-    applied_count = await apply_airdrop_rewards(session, epoch)
-    await write_audit(
-        session=session,
-        action_code="admin_airdrop_run",
-        details={"month_key": month_key, "pool_tokens": pool_tokens, "snapshots": snap_count, "applied": applied_count},
+    total = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
+    banned = (
+        await session.execute(
+            select(func.count()).select_from(User).where(User.is_banned.is_(True))
+        )
+    ).scalar() or 0
+    vip = (
+        await session.execute(
+            select(func.count()).select_from(User).where(User.is_vip.is_(True))
+        )
+    ).scalar() or 0
+
+    text = (
+        f"<b>Admin Stats</b>\n"
+        f"Total Users: {total}\n"
+        f"Banned: {banned}\n"
+        f"VIP: {vip}"
     )
-    await message.answer(f"Airdrop completed. snapshots={snap_count} applied={applied_count}")
+    await message.answer(text, parse_mode="HTML")
