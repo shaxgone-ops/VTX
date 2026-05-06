@@ -593,3 +593,41 @@ async def admin_stats_cmd(message: Message, **data: Any) -> None:
         f"VIP: {vip}"
     )
     await message.answer(text, parse_mode="HTML")
+
+@router.message(Command("add_tokens"))
+async def admin_add_tokens_cmd(message: Message, **data: Any) -> None:
+    if message.from_user.id not in settings.admin_id_set:
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Usage: /add_tokens <amount> [telegram_id]")
+        return
+
+    try:
+        amount = float(parts[1])
+    except ValueError:
+        await message.answer("Amount must be a number.")
+        return
+
+    target_id = message.from_user.id
+    if len(parts) >= 3:
+        try:
+            target_id = int(parts[2])
+        except ValueError:
+            target_id = message.from_user.id
+
+    session = await _get_session(data)
+    target = (
+        await session.execute(
+            select(User).where(User.telegram_id == target_id)
+        )
+    ).scalar_one_or_none()
+
+    if not target:
+        await message.answer("User not found in DB.")
+        return
+
+    target.total_tokens += amount
+    await session.commit()
+    await message.answer(f"Added {amount:,.0f} tokens to User {target_id}. New balance: {target.total_tokens:,.0f}")
