@@ -53,11 +53,17 @@ async def create_tables() -> None:
         
         # Auto-migrate: Add newly added columns if they don't exist
         try:
+            # Users table
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS language_code VARCHAR(12)"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS locale VARCHAR(12)"))
             await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_earnings_sync_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"))
+            
+            # Cards table
+            await conn.execute(text("ALTER TABLE card_definitions ADD COLUMN IF NOT EXISTS category VARCHAR(100)"))
+            await conn.execute(text("ALTER TABLE card_definitions ADD COLUMN IF NOT EXISTS description VARCHAR(255)"))
+            await conn.execute(text("ALTER TABLE card_definitions ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0"))
         except Exception as e:
-            logger.warning(f"Failed to auto-migrate 'users' table columns: {e}")
+            logger.warning(f"Failed to auto-migrate table columns: {e}")
 
     logger.info("Database tables and missing columns ensured")
 

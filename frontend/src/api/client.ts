@@ -2,7 +2,12 @@ import axios from 'axios';
 import WebApp from '@twa-dev/sdk';
 
 // Get base URL from env or fallback to Render backend
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://vtx-px5f.onrender.com/api';
+let API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://vtx-px5f.onrender.com/api';
+
+// Auto-correct missing /api if user just pasted the raw backend URL into Render
+if (!API_BASE_URL.endsWith('/api')) {
+  API_BASE_URL = API_BASE_URL.replace(/\/$/, '') + '/api';
+}
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
