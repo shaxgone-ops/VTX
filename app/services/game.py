@@ -30,6 +30,11 @@ settings = get_settings()
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+def ensure_aware(dt: datetime) -> datetime:
+    """Ensure a datetime object is timezone-aware."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 # ---------------------------------------------------------------------------
 #  Stamina regeneration
@@ -42,7 +47,8 @@ def regenerate_stamina(user: User) -> int:
     Returns amount regenerated.
     """
     now = utcnow()
-    elapsed_minutes = (now - user.last_stamina_sync_at).total_seconds() / 60.0
+    last_sync = ensure_aware(user.last_stamina_sync_at)
+    elapsed_minutes = (now - last_sync).total_seconds() / 60.0
 
     if elapsed_minutes < 0.1:
         return 0
@@ -70,7 +76,8 @@ def calculate_offline_earnings(user: User) -> float:
     Returns tokens earned.
     """
     now = utcnow()
-    elapsed_hours = (now - user.last_earnings_sync_at).total_seconds() / 3600.0
+    last_sync = ensure_aware(user.last_earnings_sync_at)
+    elapsed_hours = (now - last_sync).total_seconds() / 3600.0
 
     if elapsed_hours < 0.01:  # Less than 36 seconds
         return 0.0
