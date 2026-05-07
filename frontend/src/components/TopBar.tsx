@@ -1,5 +1,6 @@
 import React from 'react';
 import { useGameStore } from '../store/gameStore';
+import { formatCompactNumber } from '../utils';
 
 export const TopBar: React.FC = () => {
   const { user } = useGameStore();
@@ -21,7 +22,7 @@ export const TopBar: React.FC = () => {
       <div style={{ textAlign: 'right' }}>
         <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Profit / hour</div>
         <div className="text-gradient-success" style={{ fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px', justifyContent: 'flex-end', color: 'var(--accent-success)' }}>
-          +{new Intl.NumberFormat('en-US').format(user.profit_per_hour)} VTX
+          +{formatCompactNumber(user.profit_per_hour)} VTX
         </div>
       </div>
     </div>

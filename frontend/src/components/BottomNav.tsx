@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Pickaxe, Store, Award, Trophy } from 'lucide-react';
+import { Pickaxe, Store, Award, Trophy, Wallet } from 'lucide-react';
 
 export const BottomNav: React.FC = () => {
   const defaultClass = "nav-item";
@@ -38,6 +38,14 @@ export const BottomNav: React.FC = () => {
       >
         <Trophy className="nav-icon" />
         <span>Top</span>
+      </NavLink>
+
+      <NavLink 
+        to="/airdrop" 
+        className={({ isActive }) => isActive ? activeClass : defaultClass}
+      >
+        <Wallet className="nav-icon" />
+        <span>Airdrop</span>
       </NavLink>
     </div>
   );

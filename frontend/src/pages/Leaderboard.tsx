@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { useGameStore } from '../store/gameStore';
 import { Trophy, Medal } from 'lucide-react';
+import { formatCompactNumber } from '../utils';
 
 export const Leaderboard: React.FC = () => {
   const { user } = useGameStore();
@@ -55,10 +56,10 @@ export const Leaderboard: React.FC = () => {
             
             <div style={{ textAlign: 'right' }}>
                <div style={{ fontWeight: 'bold', color: 'var(--accent-neon)' }}>
-                 {new Intl.NumberFormat('en-US', { notation: "compact" }).format(p.balance)}
+                 {formatCompactNumber(p.balance)}
                </div>
                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                 {new Intl.NumberFormat('en-US', { notation: "compact" }).format(p.profit_per_hour)}/h
+                 {formatCompactNumber(p.profit_per_hour)}/h
                </div>
             </div>
           </div>

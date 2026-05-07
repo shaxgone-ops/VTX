@@ -10,6 +10,8 @@ import { TapArena } from './pages/TapArena';
 import { Market } from './pages/Market';
 import { Earn } from './pages/Earn';
 import { Leaderboard } from './pages/Leaderboard';
+import { Airdrop } from './pages/Airdrop';
+import { formatCompactNumber } from './utils';
 
 const App: React.FC = () => {
   const { fetchProfile, user, isLoading, error } = useGameStore();
@@ -51,7 +53,7 @@ const App: React.FC = () => {
             <div className="glass-panel" style={{ padding: 30, textAlign: 'center', maxWidth: 350 }}>
               <h2>Offline Profits!</h2>
               <p style={{ margin: '20px 0', color: 'var(--text-secondary)' }}>You gained tokens while you were away!</p>
-              <h1 className="text-gradient-gold">+{new Intl.NumberFormat('en-US').format(user.offline_earned)}</h1>
+              <h1 className="text-gradient-gold">+{formatCompactNumber(user.offline_earned)}</h1>
               <button 
                  className="btn-upgrade affordable" 
                  style={{ width: '100%', marginTop: 20 }}
@@ -71,6 +73,7 @@ const App: React.FC = () => {
             <Route path="/market" element={<Market />} />
             <Route path="/earn" element={<Earn />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
+            <Route path="/airdrop" element={<Airdrop />} />
           </Routes>
         </div>
 

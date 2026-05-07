@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useGameStore } from '../store/gameStore';
 import { motion, AnimatePresence } from 'framer-motion';
+import { formatCompactNumber } from '../utils';
 
 interface FloatingText {
   id: number;
@@ -72,7 +73,7 @@ export const TapArena: React.FC = () => {
         <div className="balance-amount">
           <img src="/logo.png" alt="VTX" className="token-icon" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <span className="text-gradient-gold">
-            {new Intl.NumberFormat('en-US').format(user.balance)}
+            {formatCompactNumber(user.balance)}
           </span>
         </div>
       </div>
